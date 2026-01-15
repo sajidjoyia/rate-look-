@@ -1,0 +1,7 @@
+{
+  "name": "LensCritique - Community Photo Feedback",
+  "description": "A fair, anonymous, community-driven feedback platform where users exchange reviews to unlock their own photo insights.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
