@@ -14,7 +14,9 @@ import {
   ExternalLink,
   Code,
   Copy,
-  Check
+  Check,
+  Image as ImageIcon,
+  Sparkles
 } from 'lucide-react';
 
 interface AdminPanelProps {
@@ -22,45 +24,92 @@ interface AdminPanelProps {
   onUpdate: () => void;
 }
 
-const SAMPLE_POSTS = [
-  {
-    username: 'FashionBot',
-    categories: ['Fashion', 'Lifestyle'] as Category[],
-    image: 'https://images.unsplash.com/photo-1488161628813-244a26a2f690?q=80&w=800',
-    question: 'Rate my summer street style'
-  },
-  {
-    username: 'CareerBot',
-    categories: ['Professional'] as Category[],
-    image: 'https://images.unsplash.com/photo-1519085186583-fbc1192759e2?q=80&w=800',
-    question: 'Is this headshot too serious for LinkedIn?'
-  },
-  {
-    username: 'DatingBot',
-    categories: ['Dating'] as Category[],
-    image: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?q=80&w=800',
-    question: 'Does this vibe work for a dating profile?'
-  }
-];
-
 const AdminPanel: React.FC<AdminPanelProps> = ({ profile, onUpdate }) => {
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const SQL_FIX = `-- 1. FIX POSTS TABLE RLS
+  const SQL_FIX = `-- 1. CREATE ALL NECESSARY TABLES
+-- Paste this into your Supabase SQL Editor and click 'Run'
+
+-- Create Profiles Table
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id uuid REFERENCES auth.users ON DELETE CASCADE PRIMARY KEY,
+  username text UNIQUE,
+  avatar_url text,
+  interests text[],
+  total_confidence int DEFAULT 0,
+  total_style int DEFAULT 0,
+  total_approachability int DEFAULT 0,
+  review_count int DEFAULT 0,
+  posts_remaining_to_unlock int DEFAULT 3,
+  updated_at timestamp with time zone DEFAULT now()
+);
+
+-- Create Posts Table (Crucial: categories is text[])
+CREATE TABLE IF NOT EXISTS public.posts (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id uuid REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+  categories text[] NOT NULL,
+  image_urls text[] NOT NULL,
+  questions text[],
+  is_live boolean DEFAULT false,
+  reviews_required int DEFAULT 3,
+  reviews_received int DEFAULT 0,
+  created_at timestamp with time zone DEFAULT now()
+);
+
+-- Create Reviews Table
+CREATE TABLE IF NOT EXISTS public.reviews (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  post_id uuid REFERENCES public.posts(id) ON DELETE CASCADE NOT NULL,
+  reviewer_id uuid REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+  confidence_score int NOT NULL,
+  style_score int NOT NULL,
+  approachability_score int NOT NULL,
+  answers text[],
+  general_feedback text NOT NULL,
+  is_anonymous boolean DEFAULT true,
+  created_at timestamp with time zone DEFAULT now()
+);
+
+-- 2. ENABLE RLS AND SET POLICIES
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public profiles" ON public.profiles FOR SELECT USING (true);
+CREATE POLICY "Users update own" ON public.profiles FOR UPDATE USING (true);
+CREATE POLICY "Public insert" ON public.profiles FOR INSERT WITH CHECK (true);
+
 ALTER TABLE public.posts ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Enable all for users" ON public.posts FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Public view posts" ON public.posts FOR SELECT USING (true);
+CREATE POLICY "Public insert posts" ON public.posts FOR INSERT WITH CHECK (true);
+CREATE POLICY "Public update posts" ON public.posts FOR UPDATE USING (true);
+CREATE POLICY "Public delete posts" ON public.posts FOR DELETE USING (true);
 
--- 2. FIX STORAGE BUCKET RLS (Run this to allow uploads)
--- Ensure you have a bucket named 'photos' created in the Supabase UI first!
+ALTER TABLE public.reviews ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public view reviews" ON public.reviews FOR SELECT USING (true);
+CREATE POLICY "Public insert reviews" ON public.reviews FOR INSERT WITH CHECK (true);
+
+-- 3. STORAGE SETUP
 INSERT INTO storage.buckets (id, name, public) VALUES ('photos', 'photos', true) ON CONFLICT (id) DO NOTHING;
+CREATE POLICY "Public Storage Access" ON storage.objects FOR SELECT USING (bucket_id = 'photos');
+CREATE POLICY "Public Storage Insert" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'photos');
+CREATE POLICY "Public Storage All" ON storage.objects FOR ALL USING (bucket_id = 'photos');
 
-CREATE POLICY "Public Read" ON storage.objects FOR SELECT USING (bucket_id = 'photos');
-CREATE POLICY "Auth Upload" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'photos' AND auth.role() = 'authenticated');
-CREATE POLICY "Auth Update" ON storage.objects FOR UPDATE USING (bucket_id = 'photos' AND auth.role() = 'authenticated');
-CREATE POLICY "Auth Delete" ON storage.objects FOR DELETE USING (bucket_id = 'photos' AND auth.role() = 'authenticated');`;
+-- 4. HELPER FUNCTIONS
+CREATE OR REPLACE FUNCTION increment_post_reviews(post_id_input uuid)
+RETURNS void AS $$
+BEGIN
+  UPDATE posts SET reviews_received = reviews_received + 1 WHERE id = post_id_input;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION decrement_profile_unlock_counter(user_id_input uuid)
+RETURNS void AS $$
+BEGIN
+  UPDATE profiles SET posts_remaining_to_unlock = GREATEST(0, posts_remaining_to_unlock - 1) WHERE id = user_id_input;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;`;
 
   useEffect(() => {
     fetchPosts();
@@ -89,72 +138,34 @@ CREATE POLICY "Auth Delete" ON storage.objects FOR DELETE USING (bucket_id = 'ph
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const forceUnlockAccount = async () => {
+  const createInstantPost = async () => {
     setActionLoading(true);
     try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ posts_remaining_to_unlock: 0 })
-        .eq('id', profile.id);
+      const randomImg = `https://images.unsplash.com/photo-${1500000000000 + Math.floor(Math.random() * 1000000)}?auto=format&fit=crop&w=800&q=80`;
       
-      if (error) throw error;
-      onUpdate();
-      alert("Account Unlocked! You can now post live content immediately.");
-    } catch (err) {
-      console.error(err);
-      alert("Failed to unlock account. Ensure 'profiles' table has 'Update' RLS enabled.");
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const makePostLive = async (postId: string) => {
-    setActionLoading(true);
-    try {
-      const { error } = await supabase
-        .from('posts')
-        .update({ is_live: true })
-        .eq('id', postId);
-      if (error) throw error;
-      await fetchPosts();
-    } catch (err) {
-      console.error(err);
-      alert("Failed to make post live.");
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const seedGlobalPosts = async () => {
-    setActionLoading(true);
-    try {
-      const botId = '00000000-0000-0000-0000-000000000000'; 
-      
+      // Ensure profile exists
       await supabase.from('profiles').upsert({
-        id: botId,
-        username: 'SystemBot',
-        interests: ['Social', 'Lifestyle'],
-        posts_remaining_to_unlock: 0,
-        review_count: 999
+        id: profile.id,
+        username: profile.username,
+        interests: ['Fashion', 'Social']
       });
 
-      for (const sample of SAMPLE_POSTS) {
-        await supabase.from('posts').insert({
-          user_id: botId,
-          categories: sample.categories,
-          image_urls: [sample.image],
-          questions: [sample.question],
-          is_live: true,
-          reviews_required: 5,
-          reviews_received: 0
-        });
-      }
-      
+      const { error } = await supabase.from('posts').insert({
+        user_id: profile.id,
+        categories: ['Social', 'Lifestyle'],
+        image_urls: [randomImg],
+        questions: ["Is the lighting on this Unsplash photo good?"],
+        is_live: true,
+        reviews_required: 3,
+        reviews_received: 0
+      });
+
+      if (error) throw error;
       await fetchPosts();
-      alert("Seeded global live posts successfully!");
-    } catch (err) {
+      alert("Instant Post Created!");
+    } catch (err: any) {
       console.error(err);
-      alert("Seeding failed. Check console for details.");
+      alert(`Failed: ${err.message}. If 'categories' error persists, please run the SQL Fix.`);
     } finally {
       setActionLoading(false);
     }
@@ -175,106 +186,135 @@ CREATE POLICY "Auth Delete" ON storage.objects FOR DELETE USING (bucket_id = 'ph
     }
   };
 
+  const makePostLive = async (postId: string) => {
+    setActionLoading(true);
+    try {
+      const { error } = await supabase.from('posts').update({ is_live: true }).eq('id', postId);
+      if (error) throw error;
+      await fetchPosts();
+    } catch (err) {
+      console.error(err);
+      alert("Status update failed.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   return (
-    <div className="max-w-6xl mx-auto p-4 md:py-12">
-      <div className="bg-slate-900 text-white p-8 rounded-[2.5rem] shadow-2xl mb-10 border border-slate-800">
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+    <div className="max-w-7xl mx-auto p-4 md:py-12">
+      <div className="bg-slate-900 text-white p-8 rounded-[3rem] shadow-2xl mb-12 relative overflow-hidden">
+        <div className="absolute top-0 right-0 p-12 opacity-10">
+          <ShieldAlert size={120} />
+        </div>
+        <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-8">
           <div>
-            <div className="flex items-center gap-2 mb-2">
-              <ShieldAlert className="text-indigo-400" />
-              <h1 className="text-3xl font-black tracking-tight uppercase">Admin Engine</h1>
+            <div className="flex items-center gap-3 mb-3">
+              <span className="bg-indigo-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-md tracking-widest">Setup Tool</span>
+              <h1 className="text-4xl font-black tracking-tighter uppercase">Admin Panel</h1>
             </div>
-            <p className="text-slate-400 text-sm font-medium">Bypass restrictions and fix database issues.</p>
+            <p className="text-slate-400 font-medium max-w-lg italic">
+              Fix schema errors like missing "categories" column by running the SQL script below.
+            </p>
           </div>
-          <div className="flex flex-wrap gap-3 w-full md:w-auto">
-            <button onClick={forceUnlockAccount} disabled={actionLoading} className="flex-1 md:flex-none bg-amber-500 hover:bg-amber-600 text-white px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all">
-              <Zap size={18} fill="currentColor" /> Unlock Me
+          <div className="flex flex-wrap gap-4 w-full md:w-auto">
+            <button 
+              onClick={createInstantPost} 
+              disabled={actionLoading} 
+              className="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-4 rounded-2xl font-black flex items-center justify-center gap-3 transition-all shadow-xl active:scale-95"
+            >
+              {actionLoading ? <Loader2 className="animate-spin" /> : <Sparkles size={20} />}
+              Instant Post (Test Feed)
             </button>
-            <button onClick={seedGlobalPosts} disabled={actionLoading} className="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all">
-              <PlusCircle size={18} /> Seed Bot Posts
+            <button 
+              onClick={() => {
+                supabase.from('profiles').update({ posts_remaining_to_unlock: 0 }).eq('id', profile.id).then(() => {
+                  onUpdate();
+                  alert("Account Unlocked!");
+                });
+              }} 
+              className="flex-1 md:flex-none bg-amber-500 hover:bg-amber-600 text-white px-8 py-4 rounded-2xl font-black flex items-center justify-center gap-3 transition-all shadow-xl shadow-amber-500/20"
+            >
+              <Zap size={20} fill="currentColor" /> Force Unlock Me
             </button>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* SQL Fix Column */}
-        <div className="lg:col-span-1">
-          <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm h-full">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-black text-slate-800 uppercase tracking-widest text-sm flex items-center gap-2">
-                <Code size={18} className="text-indigo-600" />
-                RLS Fix SQL
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        <div className="lg:col-span-5">
+          <div className="bg-white rounded-[2.5rem] p-8 border border-slate-200 shadow-sm sticky top-24">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-black text-slate-800 uppercase tracking-tight flex items-center gap-2">
+                <Code size={24} className="text-indigo-600" />
+                Schema & RLS Fix
               </h2>
-              <button onClick={copySql} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded-lg transition-colors">
-                {copied ? <Check size={18} /> : <Copy size={18} />}
+              <button 
+                onClick={copySql} 
+                className={`p-3 rounded-xl transition-all ${copied ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'}`}
+              >
+                {copied ? <Check size={20} /> : <Copy size={20} />}
               </button>
             </div>
-            <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-              Copy and run this in your <b>Supabase SQL Editor</b> to fix "New row violates RLS" errors for posts and image uploads.
-            </p>
-            <pre className="bg-slate-900 text-indigo-300 p-4 rounded-xl text-[10px] font-mono overflow-x-auto h-[400px] leading-relaxed border border-indigo-900/30">
+            <div className="bg-amber-50 border border-amber-100 p-4 rounded-2xl mb-6">
+               <p className="text-xs text-amber-800 font-bold leading-relaxed">
+                 <span className="inline-block mr-1">⚠️</span> 
+                 Paste this into your Supabase Dashboard > SQL Editor to resolve the "Could not find categories column" error.
+               </p>
+            </div>
+            <pre className="bg-slate-900 text-indigo-300 p-6 rounded-2xl text-[10px] font-mono overflow-x-auto h-[450px] leading-relaxed border border-indigo-900/30">
               {SQL_FIX}
             </pre>
           </div>
         </div>
 
-        {/* Posts Management Column */}
-        <div className="lg:col-span-2 space-y-4">
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="p-6 border-b border-slate-50 flex items-center justify-between">
-              <h2 className="font-bold text-slate-800 flex items-center gap-2">
-                <Database size={20} className="text-indigo-600" />
-                Database Registry ({posts.length})
+        <div className="lg:col-span-7">
+          <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden min-h-[600px]">
+            <div className="p-8 border-b border-slate-50 flex items-center justify-between bg-slate-50/50">
+              <h2 className="text-xl font-black text-slate-800 flex items-center gap-2 uppercase tracking-tight">
+                <Database size={24} className="text-indigo-600" />
+                Data Registry
               </h2>
-              <button onClick={fetchPosts} className="p-2 text-slate-400 hover:text-indigo-600 transition-colors">
-                <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
+              <button onClick={fetchPosts} className="p-3 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-all text-slate-500">
+                <RefreshCw size={20} className={loading ? 'animate-spin' : ''} />
               </button>
             </div>
 
-            <div className="max-h-[600px] overflow-y-auto">
-              {loading ? (
-                <div className="p-20 flex justify-center"><Loader2 className="animate-spin text-indigo-600" size={40} /></div>
-              ) : posts.length === 0 ? (
-                <div className="p-20 text-center text-slate-400 italic font-medium uppercase text-xs tracking-widest">No data entries found</div>
-              ) : (
-                <div className="divide-y divide-slate-50">
-                  {posts.map(post => (
-                    <div key={post.id} className="p-4 hover:bg-slate-50 transition-colors flex items-center gap-4">
-                      <div className="w-12 h-16 bg-slate-100 rounded-lg overflow-hidden flex-shrink-0 border border-slate-200">
-                        <img src={post.image_urls[0]} className="w-full h-full object-cover" alt="" />
+            {loading ? (
+              <div className="p-40 flex flex-col items-center justify-center gap-4">
+                <Loader2 className="animate-spin text-indigo-600" size={48} />
+                <p className="text-slate-400 font-black uppercase text-xs tracking-widest">Refreshing...</p>
+              </div>
+            ) : posts.length === 0 ? (
+              <div className="p-40 text-center text-slate-300">
+                <ImageIcon size={40} className="mx-auto mb-4 opacity-20" />
+                <p className="font-bold uppercase text-[10px] tracking-widest">No entries found</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-50">
+                {posts.map(post => (
+                  <div key={post.id} className="p-6 flex items-center gap-6 hover:bg-slate-50/50 transition-colors">
+                    <img src={post.image_urls[0]} className="w-16 h-20 rounded-xl object-cover border border-slate-200 shadow-sm" alt="" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="font-black text-slate-800 text-sm">@{post.profiles?.username || 'user'}</span>
+                        {!post.is_live && <span className="text-[8px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded font-black uppercase">Locked</span>}
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-bold text-sm text-slate-800">@{post.profiles?.username || 'user'}</span>
-                          {!post.is_live && (
-                            <span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[8px] font-black uppercase">Locked</span>
-                          )}
-                        </div>
-                        <p className="text-[10px] text-slate-400 font-mono truncate">{post.id}</p>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        {!post.is_live && (
-                          <button 
-                            onClick={() => makePostLive(post.id)}
-                            className="p-2 text-green-500 hover:bg-green-50 rounded-lg transition-colors"
-                            title="Make Live"
-                          >
-                            <CheckCircle size={18} />
-                          </button>
-                        )}
-                        <button 
-                          onClick={() => deletePost(post.id)}
-                          className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                        >
-                          <Trash2 size={18} />
-                        </button>
-                      </div>
+                      <p className="text-[10px] text-slate-400 font-mono truncate">{post.id}</p>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
+                    <div className="flex gap-2">
+                       {!post.is_live && (
+                         <button onClick={() => makePostLive(post.id)} className="p-2 text-emerald-500 hover:bg-emerald-50 rounded-lg">
+                           <CheckCircle size={20} />
+                         </button>
+                       )}
+                       <button onClick={() => deletePost(post.id)} className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg">
+                         <Trash2 size={20} />
+                       </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
